@@ -1,4 +1,4 @@
-# Projet Détection de chutes depuis le lit - FallCall
+# - FallCall - Projet détection de chutes depuis le lit 
 
 ## Cadre du projet
 
