@@ -3,82 +3,58 @@ import cv2
 import numpy as np
 import requests
 import pygame
+import matplotlib.pyplot as plt
 from collections import deque
+import config as cfg
 
 # =========================================
-#         CONFIGURATION GÉNÉRALE
+#   SELECTION INTERACTIVE DE LA VIDEO
 # =========================================
 
-VIDEO_PATH = os.path.join("videos", "chute_lumiere_lente_1.MOV")
+def select_video():
+    print(f"\n--- SELECTION VIDEO ({cfg.VIDEOS_DIR}) ---")
+    
+    # Récupérer la liste des fichiers vidéo
+    try:
+        files = [f for f in os.listdir(cfg.VIDEOS_DIR) if f.lower().endswith(('.mp4', '.mov', '.avi'))]
+    except FileNotFoundError:
+        print(f"❌ Erreur : Le dossier '{cfg.VIDEOS_DIR}' n'existe pas.")
+        return None
 
-ROTATE_VIDEO = True
-WINDOW_SCALE = 0.6
+    if not files:
+        print("❌ Aucune vidéo trouvée dans le dossier.")
+        return None
 
-USER_GAMMA = 2.9
-USER_BRIGHTNESS = 200
-USER_CONTRAST = -67
+    # Afficher la liste numérotée
+    for i, f in enumerate(files):
+        print(f"[{i+1}] {f}")
+    
+    print("[0] Quitter")
 
-ANALYSIS_STRIDE = 5
-CONSECUTIVE_VALIDATIONS = 5 
-DARKNESS_THRESHOLD = 30
+    # Demander le choix à l'utilisateur
+    while True:
+        try:
+            choice = int(input("\nEntrez le numéro de la vidéo : "))
+            if choice == 0:
+                return None
+            if 1 <= choice <= len(files):
+                selected_file = files[choice - 1]
+                return os.path.join(cfg.VIDEOS_DIR, selected_file)
+            print("❌ Numéro invalide.")
+        except ValueError:
+            print("❌ Veuillez entrer un nombre entier.")
 
-DEBUG = True
-DISPLAY_VIDEO = True
-ALERT_API_URL = "http://127.0.0.1:5000/api/alert"
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ALERT_MP3_PATH = os.path.join(BASE_DIR, "static", "alert.mp3")
+# Appel de la fonction de sélection
+VIDEO_PATH = select_video()
 
-# =========================================
-#     PARAMÈTRES JOUR / NUIT
-# =========================================
+if VIDEO_PATH is None:
+    print("Au revoir !")
+    exit() # Arrête le script proprement
 
-# --- MODE JOUR ---
-DAY_BLUR = (5, 5)
-DAY_THRESHOLD = 10
-DAY_CLAHE = 1.0 
-DAY_MIN_AREA = 5000000 
-DY_DAY_THRESHOLD = 50 
-
-# --- MODE NUIT ---
-NIGHT_BLUR = (7, 7)
-NIGHT_THRESHOLD = 5
-NIGHT_CLAHE = 8
-NIGHT_MIN_AREA = 2000000 
-DY_NIGHT_THRESHOLD = 20 
-
-# =========================================
-#   FONCTIONS PRÉTRAITEMENT
-# =========================================
-
-def adjust_gamma(image, gamma=1.0):
-    if gamma == 0: return image
-    invGamma = 1.0 / gamma
-    table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-    return cv2.LUT(image, table)
-
-def apply_user_settings(frame_gray):
-    frame = adjust_gamma(frame_gray, gamma=USER_GAMMA)
-    alpha = 1.0 + (USER_CONTRAST / 100.0)
-    beta = USER_BRIGHTNESS
-    frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    frame = clahe.apply(frame)
-    return frame
-
-def apply_light_condition(gray, brightness, darkness_threshold):
-    # 🌙 MODE NUIT
-    if brightness < darkness_threshold:
-        gray_proc = cv2.GaussianBlur(gray, NIGHT_BLUR, 0)
-        clahe = cv2.createCLAHE(clipLimit=NIGHT_CLAHE, tileGridSize=(8, 8))
-        gray_proc = clahe.apply(gray_proc)
-        return (gray_proc, "MODE NUIT", (0, 165, 255), NIGHT_THRESHOLD, NIGHT_MIN_AREA, DY_NIGHT_THRESHOLD)
-    # ☀️ MODE JOUR
-    else:
-        gray_proc = cv2.GaussianBlur(gray, DAY_BLUR, 0)
-        return (gray_proc, "MODE JOUR", (0, 255, 0), DAY_THRESHOLD, DAY_MIN_AREA, DY_DAY_THRESHOLD)
+print(f"\n✅ Lancement de : {os.path.basename(VIDEO_PATH)}")
 
 # =========================================
-#   INITIALISATION
+#   INITIALISATION AUDIO / VIDEO
 # =========================================
 
 try:
@@ -94,34 +70,64 @@ if not cap.isOpened():
 fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 display_delay = max(1, int(1000 / fps))
 
-prev_gray = None
-frame_idx = 0
-fall_detected = False
-fall_frame_info = "Aucune chute"
-y_history = deque(maxlen=ANALYSIS_STRIDE + 1)
-fall_counter = 0
-current_dy = 0
-posture_text = "INCONNU" # Pour l'affichage
+# =========================================
+#   FONCTION LOCALES
+# =========================================
 
-print("--- Analyse Hybride (Info Complète) ---")
+def apply_light_condition(gray, brightness):
+    """
+    Retourne les paramètres et aussi les INFOS D'AFFICHAGE (Textes, Couleurs)
+    """
+    if brightness < cfg.DARKNESS_THRESHOLD:
+        gray_proc = cv2.GaussianBlur(gray, cfg.NIGHT_BLUR, 0)
+        clahe = cv2.createCLAHE(clipLimit=cfg.NIGHT_CLAHE, tileGridSize=(8, 8))
+        gray_proc = clahe.apply(gray_proc)
+        return (gray_proc, "MODE NUIT", (0, 165, 255), cfg.NIGHT_THRESHOLD, cfg.NIGHT_MIN_AREA, cfg.DY_NIGHT_THRESHOLD)
+    else:
+        gray_proc = cv2.GaussianBlur(gray, cfg.DAY_BLUR, 0)
+        return (gray_proc, "MODE JOUR", (0, 255, 0), cfg.DAY_THRESHOLD, cfg.DAY_MIN_AREA, cfg.DY_DAY_THRESHOLD)
 
 # =========================================
 #        BOUCLE PRINCIPALE
 # =========================================
+
+prev_gray = None
+frame_idx = 0
+fall_detected = False
+fall_frame_info = "Aucune chute"
+fall_detected_frame = None
+
+y_history = deque(maxlen=cfg.ANALYSIS_STRIDE + 1)
+y_buffer_smooth = deque(maxlen=cfg.SMOOTHING_WINDOW)
+
+fall_counter = 0
+current_dy = 0
+posture_text = "---"
+
+# Data pour le graph final
+data_frames, data_dy, data_brightness, data_area = [], [], [], []
+
+print("--- Analyse Hybride (Interface Complète) ---")
 
 while True:
     ret, frame = cap.read()
     if not ret: break
     
     area = 0 
+    posture_text = "---"
     
-    if ROTATE_VIDEO:
+    if cfg.ROTATE_VIDEO:
         frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
     gray_raw = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     avg_brightness = np.mean(gray_raw)
 
-    (gray_active, mode_text, color_mode, threshold_pixel, min_area_mode, dy_threshold_mode) = apply_light_condition(gray_raw, avg_brightness, DARKNESS_THRESHOLD)
+    (gray_active, 
+     mode_text, 
+     color_mode, 
+     threshold_pixel, 
+     min_area_mode, 
+     dy_threshold_mode) = apply_light_condition(gray_raw, avg_brightness)
 
     display_frame = cv2.cvtColor(gray_active, cv2.COLOR_GRAY2BGR) if mode_text == "MODE NUIT" else frame
 
@@ -134,87 +140,87 @@ while True:
         area = moments["m00"]
 
         if area > min_area_mode:
-            y_center = int(moments["m01"] / moments["m00"])
+            y_raw = int(moments["m01"] / moments["m00"])
             x_center = int(moments["m10"] / moments["m00"])
             
-            # --- RECUPERATION DU RECTANGLE ---
-            x, y, w, h = cv2.boundingRect(motion_mask)
+            y_buffer_smooth.append(y_raw)
+            y_smooth = int(sum(y_buffer_smooth) / len(y_buffer_smooth))
             
-            # --- ANALYSE DE FORME (NOUVEAU) ---
-            # Si largeur >= hauteur, alors horizontal (couché)
-            is_horizontal = w*1.2 >= h  # Condition de forme élargie
+            x, y, w, h = cv2.boundingRect(motion_mask)
+            is_horizontal = w*1.2 >= h 
             posture_text = "COUCHE" if is_horizontal else "DEBOUT"
             
-            # Dessin
-            color_rect = (0, 0, 255) if is_horizontal else (0, 255, 0) # Rouge si couché, Vert si debout
-            cv2.rectangle(display_frame, (x, y), (x + w, y + h), color_rect, 2)
-            cv2.circle(display_frame, (x_center, y_center), 8, (0, 0, 255), -1)
+            if cfg.DISPLAY_VIDEO:
+                color_rect = (0, 0, 255) if is_horizontal else (0, 255, 0)
+                cv2.rectangle(display_frame, (x, y), (x + w, y + h), color_rect, 2)
+                cv2.circle(display_frame, (x_center, y_smooth), 8, (0, 0, 255), -1) 
 
-            y_history.append(y_center)
+            y_history.append(y_smooth)
 
-            if len(y_history) > ANALYSIS_STRIDE:
+            if len(y_history) > cfg.ANALYSIS_STRIDE:
                 current_dy = y_history[-1] - y_history[0]
                 if abs(y_history[-1] - y_history[-2]) < 3: current_dy = 0
 
-                # --- DETECTION COMBINÉE (VITESSE + POSTURE) ---
-                # On ne compte la chute que si :
-                # 1. La vitesse est suffisante
-                # 2. ET la personne est en position horizontale (filtre saut)
-                if current_dy > dy_threshold_mode and is_horizontal:
+                if (current_dy > dy_threshold_mode) and (current_dy < cfg.MAX_DY) and is_horizontal:
                     fall_counter += 1
                 else:
                     if fall_counter > 0: fall_counter -= 1
 
-                if (not fall_detected) and fall_counter >= CONSECUTIVE_VALIDATIONS:
+                if (not fall_detected) and fall_counter >= cfg.CONSECUTIVE_VALIDATIONS:
                     fall_detected = True
+                    fall_detected_frame = frame_idx
                     fall_frame_info = f"CHUTE: Frame {frame_idx}"
                     print(f"\n🚨 CHUTE VALIDÉE (Frame {frame_idx})")
                     try:
-                        pygame.mixer.music.load(ALERT_MP3_PATH)
+                        pygame.mixer.music.load(cfg.ALERT_MP3_PATH)
                         pygame.mixer.music.play()
-                    except: pass
-                    try:
-                        requests.post(ALERT_API_URL, json={"frame": frame_idx, "source": VIDEO_PATH}, timeout=1)
+                        requests.post(cfg.ALERT_API_URL, json={"frame": frame_idx, "source": VIDEO_PATH}, timeout=1)
                     except: pass
         else:
             if len(y_history) > 0: y_history.popleft()
+            y_buffer_smooth.clear()
             fall_counter = 0
             current_dy = 0
-            posture_text = "---"
 
     prev_gray = gray_active.copy()
+    
+    data_frames.append(frame_idx)
+    data_dy.append(current_dy)
+    data_brightness.append(avg_brightness)
+    data_area.append(area)
+    
     frame_idx += 1
 
-    # =========================================
-    #       AFFICHAGE
-    # =========================================
-
-    if DISPLAY_VIDEO:
+    if cfg.DISPLAY_VIDEO:
         height, width = display_frame.shape[:2]
-        resized_frame = cv2.resize(display_frame, (int(width * WINDOW_SCALE), int(height * WINDOW_SCALE)))
-
+        resized_frame = cv2.resize(display_frame, (int(width * cfg.WINDOW_SCALE), int(height * cfg.WINDOW_SCALE)))
+        
         overlay = resized_frame.copy()
-        cv2.rectangle(overlay, (0, 0), (280, 210), (0, 0, 0), -1) # Agrandit un peu le fond noir
+        cv2.rectangle(overlay, (0, 0), (320, 230), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.6, resized_frame, 0.4, 0, resized_frame)
-
+        
         font = cv2.FONT_HERSHEY_SIMPLEX
         
         cv2.putText(resized_frame, f"Frame: {frame_idx}", (10, 30), font, 0.6, (255, 255, 255), 1)
-        cv2.putText(resized_frame, f"Lum: {avg_brightness:.1f}", (10, 60), font, 0.6, color_mode, 1)
-        cv2.putText(resized_frame, f"Mode: {mode_text}", (10, 80), font, 0.5, color_mode, 1)
-
-        color_dy = (0, 255, 0) if current_dy < dy_threshold_mode else (0, 0, 255)
-        cv2.putText(resized_frame, f"dy: {current_dy} (Seuil {dy_threshold_mode})", (10, 110), font, 0.6, color_dy, 2)
+        cv2.putText(resized_frame, f"{mode_text} (Lum: {avg_brightness:.0f})", (10, 60), font, 0.6, color_mode, 2)
         
-        color_area = (0, 255, 255) if area > min_area_mode else (150, 150, 150)
-        cv2.putText(resized_frame, f"Area: {int(area)}", (10, 140), font, 0.6, color_area, 1)
+        if current_dy > cfg.MAX_DY:
+            color_dy = (0, 0, 255) ; txt_dy = f"dy: {current_dy} (IGNORED)"
+        elif current_dy > dy_threshold_mode:
+            color_dy = (0, 165, 255) ; txt_dy = f"dy: {current_dy} (> {dy_threshold_mode})"
+        else:
+            color_dy = (0, 255, 0) ; txt_dy = f"dy: {current_dy} (Seuil {dy_threshold_mode})"
+        cv2.putText(resized_frame, txt_dy, (10, 90), font, 0.6, color_dy, 2)
 
-        # Affichage Posture
-        color_posture = (0, 0, 255) if posture_text == "COUCHE" else (0, 255, 0)
-        cv2.putText(resized_frame, f"Pos: {posture_text}", (10, 170), font, 0.6, color_posture, 2)
+        color_area = (0, 255, 255) if area > min_area_mode else (150, 150, 150)
+        cv2.putText(resized_frame, f"Area: {int(area)}", (10, 120), font, 0.6, color_area, 1)
+        cv2.putText(resized_frame, f"Min Area: {min_area_mode}", (10, 140), font, 0.5, color_area, 1)
+
+        color_pos = (0, 0, 255) if posture_text == "COUCHE" else (0, 255, 0)
+        cv2.putText(resized_frame, f"Pos: {posture_text}", (10, 170), font, 0.6, color_pos, 2)
 
         color_alert = (255, 255, 255) if not fall_detected else (0, 0, 255)
-        cv2.putText(resized_frame, fall_frame_info, (10, 200), font, 0.7, color_alert, 2)
+        cv2.putText(resized_frame, fall_frame_info, (10, 210), font, 0.7, color_alert, 2)
 
         cv2.imshow("FallCall", resized_frame)
         if cv2.waitKey(display_delay) & 0xFF == ord("q"):
@@ -222,3 +228,41 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
+
+# =========================================
+#       GENERATION DU GRAPHIQUE
+# =========================================
+print("📊 Génération du graphique...")
+os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+
+if len(data_frames) > 0:
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
+    
+    ax1.plot(data_frames, data_dy, label="Vitesse (dy)", color="blue")
+    ax1.axhline(y=cfg.DY_DAY_THRESHOLD, color='green', linestyle='--', label="Seuil Jour")
+    ax1.axhline(y=cfg.DY_NIGHT_THRESHOLD, color='orange', linestyle='--', label="Seuil Nuit")
+    ax1.set_ylabel("Vitesse (px/s)")
+    if fall_detected_frame:
+        ax1.axvline(x=fall_detected_frame, color='red', linewidth=2, label="Chute")
+    ax1.legend()
+    ax1.grid(True)
+
+    ax2.plot(data_frames, data_area, label="Surface", color="purple")
+    ax2.axhline(y=cfg.DAY_MIN_AREA, color='green', linestyle='--')
+    ax2.axhline(y=cfg.NIGHT_MIN_AREA, color='orange', linestyle='--')
+    ax2.set_ylabel("Pixels²")
+    ax2.grid(True)
+
+    ax3.plot(data_frames, data_brightness, label="Luminosité", color="gold")
+    ax3.axhline(y=cfg.DARKNESS_THRESHOLD, color='black', linestyle='--')
+    ax3.fill_between(data_frames, 0, cfg.DARKNESS_THRESHOLD, color='gray', alpha=0.2)
+    ax3.set_ylabel("Lum")
+    ax3.grid(True)
+
+    filename_clean = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
+    graph_path = os.path.join(cfg.OUTPUT_DIR, f"{filename_clean}_analyse.png")
+    plt.savefig(graph_path)
+    plt.close()
+    print(f"✅ Graphique : {graph_path}")
+    try: os.startfile(graph_path)
+    except: pass

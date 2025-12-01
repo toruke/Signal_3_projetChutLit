@@ -1,118 +1,61 @@
 import os
 import cv2
 import numpy as np
+import matplotlib.pyplot as plt
 from collections import deque
 import concurrent.futures
 import time
-
+import config as cfg 
 # =========================================
-#         CONFIGURATION DU TEST
-# =========================================
-
-VIDEOS_DIR = os.path.join("videos")
-
-TEST_CASES = {
-    "chute_lumiere_lente_1.MOV" : True,
-    "chute_lumiere_lente_2.MOV" : True,
-    "chute_lumiere_loyde_1.MOV" : True,
-    "chute_lumiere_loyde_2.MOV" : True,
-    "chute_lumiere_loyde_3.MOV" : True,
-    "chute_lumiere_loyde_bizzare.MOV" : True,
-    "chute_lumiere_obstacle.mp4" : True,
-    "chute_lumiere_retourne_loyde.MOV" : True,
-    "chute_lumiere_reveille_loyde.MOV" : True,
-    "chute_noir_basic_1.mp4" : True,
-    "chute_noir_basic_2.mp4" : True,
-    "chute_noir_lente.mp4" : True,
-    "pas_de_chute_lumiere_glissade.MOV" : False,
-    "pas_de_chute_lumiere_assis_couche.MOV" : False,
-    "pas_de_chute_lumiere_couche.MOV" : False,
-    "pas_de_chute_lumiere_coussin.mp4" : False,
-    "pas_de_chute_lumiere_eau.mp4" : False,
-    "pas_de_chute_lumiere_lever_1.MOV" : False,
-    "pas_de_chute_lumiere_lever_2.MOV" : False,
-    "pas_de_chute_lumiere_loyde_objet.MOV" : False,
-    "pas_de_chute_lumiere_loyde_rattrapage_bizzare.MOV" : False,
-    "pas_de_chute_lumiere_mouvement_amples.MOV" : False,
-    "pas_de_chute_lumiere_mouvement_fort.MOV" : False,
-    "pas_de_chute_lumiere_mouvment_leger.MOV" : False,
-    "pas_de_chute_lumiere_pipi.mp4" : False,
-    "pas_de_chute_lumiere_retourne.mp4" : False,
-    "pas_de_chute_lumiere_saut_1.MOV" : False,
-    "pas_de_chute_lumiere_saut_2.MOV" : False,
-    "pas_de_chute_noir_coussin.mp4" : False,
-    "pas_de_chute_noir_eau.mp4" : False,
-    "pas_de_chute_noir_mouvement.mp4" : False,
-    "pas_de_chute_noir_retourne.mp4" : False,
-    "pas_de_chute_penombre_multimouv.mp4" : False
-}
-
-# =========================================
-#   PARAMÈTRES
+#   FONCTIONS (Identique Main)
 # =========================================
 
-ROTATE_VIDEO = True
-WINDOW_SCALE = 0.6
-USER_GAMMA = 2.9
-USER_BRIGHTNESS = 200
-USER_CONTRAST = -67
-ANALYSIS_STRIDE = 5
-CONSECUTIVE_VALIDATIONS = 5
-DARKNESS_THRESHOLD = 30
-DAY_BLUR, DAY_THRESHOLD, DAY_MIN_AREA, DY_DAY_THRESHOLD = (5, 5), 30, 5000000, 50
-NIGHT_BLUR, NIGHT_THRESHOLD, NIGHT_MIN_AREA, DY_NIGHT_THRESHOLD = (7, 7), 20, 2000000, 20
-
-# =========================================
-#   FONCTIONS
-# =========================================
-
-def adjust_gamma(image, gamma=1.0):
-    if gamma == 0: return image
-    invGamma = 1.0 / gamma
-    table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-    return cv2.LUT(image, table)
-
-def apply_user_settings(frame_gray):
-    frame = adjust_gamma(frame_gray, gamma=USER_GAMMA)
-    alpha = 1.0 + (USER_CONTRAST / 100.0)
-    beta = USER_BRIGHTNESS
-    frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    frame = clahe.apply(frame)
-    return frame
-
-def apply_light_condition(gray, brightness, darkness_threshold):
-    if brightness < darkness_threshold:
-        gray_proc = apply_user_settings(gray)
-        return (gray_proc, NIGHT_THRESHOLD, NIGHT_MIN_AREA, DY_NIGHT_THRESHOLD)
+def apply_light_condition(gray, brightness):
+    if brightness < cfg.DARKNESS_THRESHOLD:
+        gray_proc = cv2.GaussianBlur(gray, cfg.NIGHT_BLUR, 0)
+        clahe = cv2.createCLAHE(clipLimit=cfg.NIGHT_CLAHE, tileGridSize=(8, 8))
+        gray_proc = clahe.apply(gray_proc)
+        return (gray_proc, cfg.NIGHT_THRESHOLD, cfg.NIGHT_MIN_AREA, cfg.DY_NIGHT_THRESHOLD)
     else:
-        gray_proc = cv2.GaussianBlur(gray, DAY_BLUR, 0)
-        return (gray_proc, DAY_THRESHOLD, DAY_MIN_AREA, DY_DAY_THRESHOLD)
+        gray_proc = cv2.GaussianBlur(gray, cfg.DAY_BLUR, 0)
+        return (gray_proc, cfg.DAY_THRESHOLD, cfg.DAY_MIN_AREA, cfg.DY_DAY_THRESHOLD)
 
 # =========================================
-#   MOTEUR D'ANALYSE
+#   MOTEUR D'ANALYSE (Avec enregistrement Stats)
 # =========================================
 
 def analyze_video(video_filename):
-    path = os.path.join(VIDEOS_DIR, video_filename)
+    path = os.path.join(cfg.VIDEOS_DIR, video_filename)
     if not os.path.exists(path): return None 
 
     cap = cv2.VideoCapture(path)
     prev_gray = None
-    y_history = deque(maxlen=ANALYSIS_STRIDE + 1)
+    
+    y_history = deque(maxlen=cfg.ANALYSIS_STRIDE + 1)
+    y_buffer_smooth = deque(maxlen=cfg.SMOOTHING_WINDOW)
+    
     fall_counter = 0
     detected = False
+    detected_frame = None
+
+    # Data pour stats
+    data_frames, data_dy, data_area, data_lum = [], [], [], []
+    frame_idx = 0
 
     while True:
         ret, frame = cap.read()
         if not ret: break
-
-        if ROTATE_VIDEO:
+        
+        current_dy = 0
+        area = 0
+        
+        if cfg.ROTATE_VIDEO:
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
         gray_raw = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         avg_brightness = np.mean(gray_raw)
-        (gray_active, threshold_pixel, min_area_mode, dy_threshold_mode) = apply_light_condition(gray_raw, avg_brightness, DARKNESS_THRESHOLD)
+        
+        (gray_active, threshold_pixel, min_area_mode, dy_threshold_mode) = apply_light_condition(gray_raw, avg_brightness)
 
         if prev_gray is not None:
             diff = cv2.absdiff(gray_active, prev_gray)
@@ -123,34 +66,89 @@ def analyze_video(video_filename):
             area = moments["m00"]
 
             if area > min_area_mode:
-                y_center = int(moments["m01"] / moments["m00"])
-                # Extraction Bounding Box pour vérif forme
+                y_raw = int(moments["m01"] / moments["m00"])
+                
+                # Lissage
+                y_buffer_smooth.append(y_raw)
+                y_smooth = int(sum(y_buffer_smooth) / len(y_buffer_smooth))
+                
+                # Forme
                 x, y, w, h = cv2.boundingRect(motion_mask)
-                is_horizontal = w*1.2 >= h # Condition de forme
+                is_horizontal = w*1.2 >= h 
 
-                y_history.append(y_center)
+                y_history.append(y_smooth)
 
-                if len(y_history) > ANALYSIS_STRIDE:
+                if len(y_history) > cfg.ANALYSIS_STRIDE:
                     current_dy = y_history[-1] - y_history[0]
                     if abs(y_history[-1] - y_history[-2]) < 3: current_dy = 0
 
-                    # Condition combinée : Vitesse ET Forme Horizontale
-                    if current_dy > dy_threshold_mode and is_horizontal:
+                    if (current_dy > dy_threshold_mode) and (current_dy < cfg.MAX_DY) and is_horizontal:
                         fall_counter += 1
                     else:
                         if fall_counter > 0: fall_counter -= 1
 
-                    if fall_counter >= CONSECUTIVE_VALIDATIONS:
-                        detected = True
-                        break 
+                    if fall_counter >= cfg.CONSECUTIVE_VALIDATIONS:
+                        if not detected: 
+                            detected = True
+                            detected_frame = frame_idx
             else:
                 if len(y_history) > 0: y_history.popleft() 
+                y_buffer_smooth.clear()
                 fall_counter = 0
 
         prev_gray = gray_active.copy()
+        
+        # Enregistrement Stats
+        data_frames.append(frame_idx)
+        data_dy.append(current_dy)
+        data_area.append(area)
+        data_lum.append(avg_brightness)
+        
+        frame_idx += 1
 
     cap.release()
+    
+    # --- GENERATION GRAPHIQUE SILENCIEUSE ---
+    generate_stat_graph(video_filename, data_frames, data_dy, data_area, data_lum, detected_frame)
+    
     return detected
+
+def generate_stat_graph(filename, frames, dys, areas, lums, fall_frame):
+    os.makedirs(cfg.STATS_DIR, exist_ok=True)
+    
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+    fig.suptitle(f"Analyse : {filename}")
+
+    # DY
+    ax1.plot(frames, dys, color='blue', label='dy')
+    ax1.axhline(y=cfg.DY_DAY_THRESHOLD, color='green', linestyle='--', alpha=0.5, label='Seuil Jour')
+    ax1.axhline(y=cfg.DY_NIGHT_THRESHOLD, color='orange', linestyle='--', alpha=0.5, label='Seuil Nuit')
+    ax1.set_ylabel("Vitesse")
+    if fall_frame:
+        ax1.axvline(x=fall_frame, color='red', linewidth=2, label='Chute')
+    ax1.legend(loc='upper right')
+    ax1.grid(True, alpha=0.3)
+
+    # AREA
+    ax2.plot(frames, areas, color='purple', label='Area')
+    ax2.axhline(y=cfg.DAY_MIN_AREA, color='green', linestyle='--', alpha=0.5)
+    ax2.axhline(y=cfg.NIGHT_MIN_AREA, color='orange', linestyle='--', alpha=0.5)
+    ax2.set_ylabel("Pixels²")
+    ax2.set_yscale('log')
+    ax2.grid(True, alpha=0.3)
+
+    # LUM
+    ax3.plot(frames, lums, color='gold', label='Luminosité')
+    ax3.axhline(y=cfg.DARKNESS_THRESHOLD, color='black', linestyle='--')
+    ax3.fill_between(frames, 0, cfg.DARKNESS_THRESHOLD, color='gray', alpha=0.2)
+    ax3.set_ylabel("Lum")
+    ax3.set_xlabel("Frames")
+    ax3.grid(True, alpha=0.3)
+
+    clean_name = os.path.splitext(filename)[0]
+    save_path = os.path.join(cfg.STATS_DIR, f"{clean_name}-stats.png")
+    plt.savefig(save_path)
+    plt.close()
 
 # =========================================
 #   LANCEMENT DU TEST
@@ -163,44 +161,42 @@ def process_video_task(item):
 
 if __name__ == "__main__":
     os.system('cls' if os.name == 'nt' else 'clear')
-    print("--- DÉBUT DE LA SUITE DE TESTS (MODE PARALLÈLE - FILTRE FORME) ---")
-    cpu_count = os.cpu_count()
-    print(f"Utilisation de {cpu_count} processeurs en simultané 🚀")
-    print("-" * 60)
-
+    print("--- SUITE DE TESTS + GENERATION STATS ---")
+    
+    # Nettoyage dossier stats
+    if os.path.exists(cfg.STATS_DIR):
+        for f in os.listdir(cfg.STATS_DIR):
+            try:
+                os.remove(os.path.join(cfg.STATS_DIR, f))
+            except: pass
+    
     success_count = 0
-    file_errors = 0
-    total_videos = len(TEST_CASES)
-    start_time = time.time()
+    # Correction ICI : Utilisation de TEST_CASES importé, pas cfg.TEST_CASES
+    total_videos = len(cfg.TEST_CASES)
+    
+    start_time = time.time()  # <--- DÉBUT CHRONO
 
     with concurrent.futures.ProcessPoolExecutor() as executor:
-        tasks = list(TEST_CASES.items())
-        results_iterator = executor.map(process_video_task, tasks)
+        tasks = list(cfg.TEST_CASES.items())
+        results = executor.map(process_video_task, tasks)
 
-        for filename, expected_result, actual_result in results_iterator:
-            status_symbol = ""
-            status_text = ""
-            if actual_result is None:
-                status_symbol = "⚠️"
-                status_text = "FICHIER INTROUVABLE"
-                file_errors += 1
-            elif actual_result == expected_result:
-                status_symbol = "✅"
-                status_text = "OK"
+        for filename, expected, result in results:
+            if result is None:
+                print(f"⚠️  {filename.ljust(35)} : INTROUVABLE")
+            elif result == expected:
+                print(f"✅ {filename.ljust(35)} : OK")
                 success_count += 1
             else:
-                status_symbol = "❌"
-                attendu = "CHUTE" if expected_result else "RIEN"
-                obtenu = "CHUTE" if actual_result else "RIEN"
-                status_text = f"ERREUR (Attendu: {attendu} | Obtenu: {obtenu})"
-            print(f"{status_symbol} [{filename[:35].ljust(35)}] : {status_text}")
+                attendu = "CHUTE" if expected else "RIEN"
+                recu = "CHUTE" if result else "RIEN"
+                print(f"❌ {filename.ljust(35)} : ERREUR (Attendu: {attendu}, Reçu: {recu})")
 
-    end_time = time.time()
+    end_time = time.time()    # <--- FIN CHRONO
     duration = end_time - start_time
-    score = (success_count / total_videos) * 100
 
+    score = (success_count / total_videos) * 100
     print("-" * 60)
-    if file_errors > 0: print(f"⚠️ ATTENTION : {file_errors} fichiers n'ont pas été trouvés.")
-    print(f"Temps total : {duration:.2f} secondes")
-    print(f"RESULTAT FINAL : {score:.1f}% de réussite ({success_count}/{total_videos})")
+    print(f"TEMPS TOTAL : {duration:.2f} secondes")
+    print(f"SCORE FINAL : {score:.1f}% ({success_count}/{total_videos})")
+    print(f"Les graphiques d'analyse sont dans : {cfg.STATS_DIR}")
     print("=" * 60)
